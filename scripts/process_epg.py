@@ -6,7 +6,6 @@ import requests
 
 M3U_URL = os.getenv("M3U_URL")
 SOURCE_EPG_URL = os.getenv("SOURCE_EPG_URL")
-# Supports comma-separated URLs
 EPG_GURU_URLS = [
     url.strip()
     for url in os.getenv("EPG_GURU_URLS", "").split(",")
@@ -29,7 +28,7 @@ def get_active_tvg_ids(m3u_content):
 
 def merge_xmltv():
   print("Downloading M3U...")
-  m3u_resp = requests.get(M3U_URL)
+  m3u_resp = requests.get(M3U_URL, timeout=30)
   m3u_text = m3u_resp.text
   with open("output/playlist.m3u", "w", encoding="utf-8") as f:
     f.write(m3u_text)
@@ -37,52 +36,66 @@ def merge_xmltv():
   active_ids = get_active_tvg_ids(m3u_text)
   print(f"Found {len(active_ids)} unique tvg-ids in M3U.")
 
-  print("Downloading primary Source EPG...")
-  primary_resp = requests.get(SOURCE_EPG_URL)
-  primary_tree = ET.fromstring(primary_resp.content)
+  # Create root structure for output XMLTV
+  root = ET.Element("tv")
 
-  # Track channels and programs already present
   existing_channels = set()
-  for channel in primary_tree.findall("channel"):
+
+  print("Processing primary Source EPG...")
+  primary_resp = requests.get(SOURCE_EPG_URL, timeout=60)
+  primary_root = ET.fromstring(primary_resp.content)
+
+  # Add primary channels
+  for channel in primary_root.findall("channel"):
     ch_id = channel.get("id")
     if ch_id:
       existing_channels.add(ch_id)
+      root.append(channel)
 
-  # Fetch and merge secondary epg.guru XMLs
+  # Add primary programmes only for channels present in your M3U
+  for prog in primary_root.findall("programme"):
+    if prog.get("channel") in active_ids:
+      root.append(prog)
+
+  # Clear memory
+  del primary_root
+
+  # Process secondary epg.guru URLs iteratively to save memory
   for idx, guru_url in enumerate(EPG_GURU_URLS, start=1):
-    print(f"Fetching epg.guru source #{idx}: {guru_url}")
+    print(f"Streaming and processing epg.guru source #{idx}: {guru_url}")
     try:
-      resp = requests.get(guru_url, timeout=30)
-      guru_tree = ET.fromstring(resp.content)
-
-      # Merge new channels
-      for channel in guru_tree.findall("channel"):
-        ch_id = channel.get("id")
-        if ch_id and ch_id not in existing_channels:
-          primary_tree.append(channel)
-          existing_channels.add(ch_id)
-
-      # Merge programmes for existing or newly added channels
-      for prog in guru_tree.findall("programme"):
-        ch_id = prog.get("channel")
-        # Optional: verify if program belongs to active channels in your M3U
-        if ch_id in existing_channels:
-          primary_tree.append(prog)
-
+      resp = requests.get(guru_url, timeout=60, stream=True)
+      # Parse XML iteratively using iterparse
+      for event, elem in ET.iterparse(resp.raw, events=("end",)):
+        if elem.tag == "channel":
+          ch_id = elem.get("id")
+          if ch_id and ch_id not in existing_channels:
+            existing_channels.add(ch_id)
+            root.append(elem)
+          else:
+            elem.clear()
+        elif elem.tag == "programme":
+          ch_id = elem.get("channel")
+          if ch_id in active_ids:
+            root.append(elem)
+          else:
+            elem.clear()
     except Exception as e:
       print(f"Failed to process {guru_url}: {e}")
 
-  # Write output XML
-  merged_data = ET.tostring(primary_tree, encoding="utf-8", xml_declaration=True)
+  print("Building final XML output...")
+  tree = ET.ElementTree(root)
+  # Write to bytes buffer first
+  xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
+  print("Writing and compressing files...")
   with open("output/epg.xml", "wb") as f:
-    f.write(merged_data)
+    f.write(xml_bytes)
 
-  # Compress to .xml.gz (Best practice for client players)
   with gzip.open("output/epg.xml.gz", "wb") as f:
-    f.write(merged_data)
+    f.write(xml_bytes)
 
-  print("EPG Merge and compression complete!")
+  print("Merge complete!")
 
 
 if __name__ == "__main__":
