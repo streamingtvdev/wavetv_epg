@@ -25,7 +25,8 @@ jobs:
       - name: Run Processing Script
         env:
           M3U_URL: ${{ secrets.M3U_URL }}
-          EPG_GURU_URL: ${{ secrets.EPG_GURU_URL }}
+          SOURCE_EPG_URL: ${{ secrets.SOURCE_EPG_URL }}
+          EPG_GURU_URLS: ${{ secrets.EPG_GURU_URLS }}
         run: python scripts/process_epg.py
 
       - name: Commit and Push Files
